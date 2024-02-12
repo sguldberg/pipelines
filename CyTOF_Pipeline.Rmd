@@ -1,0 +1,524 @@
+---
+title: "BMS270_CyTOF_Pipeline"
+author: "Sophia Guldberg"
+date: "2024-02-01"
+output:
+  html_document: default
+  pdf_document: default
+---
+############################################## INSTALL PACKAGES ######################################################
+
+```{r}
+#install.packages('devtools')
+#install.packages('XML')
+#install.packages('stringr')
+#install.packages('tidyverse')
+#install.packages('cowplot')
+#install.packages('viridis')
+#install.packages('RColorBrewer')
+#install.packages('dplyr')
+#install.packages('xlsx')
+
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+
+#BiocManager::install("flowCore")
+#BiocManager::install("CATALYST")
+#BiocManager::install("diffcyt")
+
+#library(devtools)
+#install_github("ParkerICI/premessa")
+#install_github("nolanlab/cytofCore")
+#CytoNorm is only necessary for batch effect correction
+#install_github('saeyslab/CytoNorm')
+```
+
+############################################## PRE- PROCESSING #######################################################
+## Load Packages for pre-processing
+
+```{r}
+library(devtools)
+library(premessa)
+library(flowCore)
+library(cytofCore)
+library(stringr)
+```
+
+
+## Pre-process raw FCS files
+Each barcode plate should be concatenated into a single FCS file prior to beginning pre-processing. This can be done easily in Cell Engine.
+
+Normalize signal within samples 
+1. Select directory
+2. Click on Normalize data
+3. Select bead type (Fluidigm)
+4. Select FCS file (any of the ones you plan to normalize are fine)
+5. Use Current file for normalization baseline
+6. Visualize beads (can take some time if files are large)
+7. Gate on the beads (should be positive for all x axis metals and negative for Ir)
+8. Either apply gate to all fcs files in the directory, or just normalize one at a time
+9. Dimiss the normalization complete message
+
+Remove Beads
+1. Click on Remove beads
+2. Select bead type (Fluidigm)
+4. Select FCS file (any available are fine, note that "normalized" has been added to the file name)
+5. After selecting FCS file, WAIT DO NOT CLICK ANYTHING. Eventually, plots will show up
+6. Choose a cutoff for bead removal. This should be a number that corresponds to the colors on the rainbow.
+7. Remove beads either from current file or all files
+8. After bead removal, close the GUI and stop the code run
+```{r}
+#normalizer_GUI()
+```
+
+Debarcode the files
+1. Create a csv file of the barcode key(s)
+2. Run the GUI
+2. Select the key
+3. Select the fcs file to debarcode (noramlized and beads removed)
+4. Plot data
+5. Pick minimum separation (minimum in bimodal counts plot)
+6. Save files
+7. If debarcoding a second plate, rename the debarcoded folder so it doesn't get overwritten in round 2
+8. After debarcoding all plates, combine all files into 1 folder for downstream analysis
+```{r}
+#debarcoder_GUI()
+```
+
+Rename channels in the files
+This step is only necessary if you dont have the correct antigen names loaded on the physical CyTOF machine while you run. I find it tedious to manually change all of the antigen names on the CyTOF machine so I always use this step.
+```{r}
+# Set the working directory to your folder containing files
+wd = "/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/pre_processing/raw/normed/beads_removed/debarcoded_all"
+setwd(wd)
+
+# Write out the current channel names into your working directory as Panel.csv
+currentFile = as.matrix(list.files(pattern = ".fcs"))[1] 
+file = read.FCS(currentFile, transformation = "linearize")
+file@parameters@data$desc
+nameFile = as.matrix(cbind(as.vector(pData(parameters(file))$name),as.vector(pData(parameters(file))$desc)))
+write.csv(nameFile, "Panel.csv", row.names=FALSE)
+
+```
+
+Rename channels
+1. Open the Panel.csv file generated in the above chunk
+2. Rename the antigens to reflect what is actually in your panel. Also remove the first line (V1, V2)
+3. Save as Panel_correct.csv
+```{r}
+# Set to your corrected panel
+setwd(wd)
+panel = "Panel_correct.csv"
+
+# Rename channels
+cytofCore.updatePanel(templateFile = panel,fcsFolder = wd)
+```
+Rename file names. This step is not necessary but I like to remove most of the long file name to include just the sample information required for downstream analysis.
+```{r}
+wd = "/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/pre_processing/raw/normed/beads_removed/debarcoded_all/relabeled"
+setwd(wd)
+# get all fcs files from wd
+files <- list.files(pattern = ".fcs")
+# remove the norm control files
+files <- Filter(function(x) !any(grepl("norm_cntrl", x)), files)
+# extract sample info from the file names
+new_files<-str_extract(files, "[M]\\d*_TU")
+new_files<-paste(new_files, ".fcs", sep="")
+#rename current file names to new file names
+file.rename(files, new_files)
+```
+At this point, FCS file are ready to go back into Cell Engine for initial gating. We want to gate out any beads (often some are left behind after the computational removal), dead cells, doublets, and erythrocytes. It's at this point that you want to check for any batch effects between plates using your normalization control. If there are batch effects, you will want to proceed with batch correction. If not, feel free to skip that step and move straight into analysis.
+
+################################################# ANALYSIS ##########################################################
+## Load Packages for downstream analysis
+
+```{r}
+library(CATALYST)
+library(flowCore)
+library(ggplot2)
+library(readxl)
+library(RColorBrewer)
+library(cowplot)
+library(viridis)
+library(diffcyt)
+```
+
+## Load data
+You will need pre-processed FCS files gated to Leukocytes only from Cell Engine, a metadata file, a panel file, and a compensation matrix. We are using a subset of the data that we pre-processed for simplicity.
+
+Load metadata file
+```{r}
+path_md <- "/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/E035_metadata_Leuk.xlsx"
+md <- read_excel(path_md)
+head(data.frame(md))
+```
+
+Load pre-processed FCS files
+```{r}
+#read in FCS files as flowSet
+path_fcs<- "/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/fcs_leukocytes"
+data<-read.flowSet(path=path_fcs, pattern="fcs$")
+```
+
+Load panel info
+```{r}
+#read in panel information
+path_panel <- "/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/E035_panel_Leuk.xlsx"
+panel <- read_excel(path_panel)
+head(data.frame(panel))
+#spot check that panel matches flowset
+all(panel$fcs_colname %in% colnames(data))
+```
+
+Create your sce object
+```{r}
+# specify levels for conditions & sample IDs to assure desired ordering
+md$condition<-factor(md$condition, levels=c("iso","PD1"))
+md$sample_id <- factor(md$sample_id, levels = md$sample_id[order(md$condition)])
+#specify columns in metadata (file_name and sample_id are the necessary ones)
+md_cols = list(file = "file_name", id = "sample_id", factors = c("condition"))
+
+# construct SingleCellExperiment
+sce <- prepData(data, panel, md, features = panel$fcs_colname, md_cols = md_cols)
+```
+
+## Compensate 
+Compensation is not strictly necessary for CyTOF data. However, sometimes channels will have noticeable spillover issues and compensating cleans up all of the data really nicely.
+
+Read in spillover matrix and format properly for CATALYST. CATALYST workflow would like you to run compensation with each CyTOF run. However, since spillover values are relatively constant and low from run to run, we have generated a spillover matrix that can be used across runs.
+```{r}
+#read in spillover matrix
+spillover<-data.frame(read_excel("/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/cytof_spillover_matrix_wDi.xlsx"))
+#set rownames to metal channels
+rownames(spillover)<-spillover$...1
+#remove extra column
+spillover<-spillover[,-1]
+#convert percentages to decimals
+spillover<-spillover/100
+#set any NA values to 0 
+spillover[is.na(spillover)] <- 0
+```
+
+Run the compensation on your sce using the spillover matrix provided. This will create new assays called "compexprs" and "compcounts"
+```{r}
+sce<-compCytof(sce, spillover, method = "nnls", overwrite = FALSE)
+```
+
+Spot check channels that tend to have a lot of spillover.
+```{r}
+chs <- c("Yb171Di", "Yb172Di")
+as <- c("exprs", "compexprs")
+ps <- lapply(as, function(a) 
+    plotScatter(sce, chs, assay = a))
+plot_grid(plotlist = ps, nrow = 1)
+```
+
+```{r}
+chs <- c("Gd156Di","Gd155Di")
+as <- c("exprs", "compexprs")
+ps <- lapply(as, function(a) 
+    plotScatter(sce, chs, assay = a))
+plot_grid(plotlist = ps, nrow = 1)
+```
+
+Write out FCS files here to be used in Cell Engine. Gate all of the major immune cell types first. Manual gating can also be used to investigate cell subsets you are more interested in or help to confirm interesting results found in the clustering stages.
+```{r}
+# write flowframe from single cell experiment using sample ID
+fs <- sce2fcs(sce, split_by = "sample_id", assay = "compcounts")
+all(c(fsApply(fs, nrow)) == table(sce$sample_id))
+ids <- fsApply(fs, identifier)
+# write out each FCS file to the path specified
+for (id in ids) {
+    ff <- fs[[id]]                     # subset 'flowFrame'
+    fn <- sprintf("comp_%s.fcs", id) # specify output name that includes ID
+    fn <- file.path("/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/comp_fcs", fn)         # construct output path
+    write.FCS(ff, fn)                  # write frame to FCS
+}
+```
+
+Periodically, you will want to save your sce object to your computer allowing you to start your analysis from where you left off. This is particularly useful when using cloud computing. In initial analysis steps, I would save an RDS after every computationally intensive step.
+```{r}
+# Save the sce object
+saveRDS(sce, file = "/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/objects/sce_comp.rds")
+
+# Read the object back in allowing you to start your analysis from here and skip the compensation steps
+#sce<-readRDS(file = "/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/objects/sce_comp.rds")
+```
+
+
+## Intial Plotting
+
+Plots a pseudobulk MDS (multi-dimensional scaling) plot. This pseudobulks each mouse and arranges them in MDS space based on median marker expression in each sample. This type of plot is very similar to a PCA.
+```{r}
+pbMDS(sce, color_by = "condition", label_by = "sample_id")
+```
+
+## Clustering and Dimensionality Reduction
+
+Clustering in CATALYST is done using the FlowSOM algorithm followed by ConsensusClusterPlus metaclustering. "features" will automatically be set to any type markers, but I like to specify my markers since I often change them when moving into re-clustering more granular immune type (i.e. CD8 T cells, macrophages, etc). 
+
+"maxK" will determine the # of clusters generated by ConsensusClusterPlus and can be set anywhere from 2 to 40. I prefer to overcluster my data beyond what I biologically expect in order to detect the rarest cell types. In later steps, we can merge together clusters which belong to the same cell type. "set.seed" is used to create reproducible results. The authors of CATALYST recommend testing your clustering on several different seeds to determine how robust your clustering is. Clustering can be very computationally intensive based on the size of your data (test dataset is small).
+```{r}
+immune_markers<-c("SiglecF","Ly6G","CD49b","CD11c","CD138","CD103","CD25","PDCA1","Ly6C","CD11b","CD8","CD4","CD3","B220","NK11","TCRgd","FcER1a","Foxp3","F480","CD115","CD64","CD19","MHCII")
+set.seed(1234)
+sce<-CATALYST::cluster(sce, features=immune_markers, maxK=20, seed=1234)
+```
+
+This generate an elbow plot which some people like to use to help choose the final number of clusters. Where the elbow bottoms out is the "optimal" numbers of clusters. This is a tool, but you should also use your knowledge of the biology of the system (i.e. how many immune cell types do we expect in a tumor?)
+```{r}
+delta_area(sce)
+```
+
+Dimensionality reduction can be done either as a TSNE or as a UMAP in CATALYST. Generation of either is very computationally intensive so CATALYST allows you to randomly subsample using "cells". 10,000 cells is typically enough to understand the DR space. If compensation is done, the assay must be set to "compexprs" and this applies to the entire downstream analysis. "exprs" is the default which is your uncompensated data. 
+```{r}
+#Generates dimentionality reduction (both TSNE and UMAP)
+#DR are computationally intensive so want to set cells somewaht low
+set.seed(1234)
+sce <- runDR(sce, "UMAP", cells = 1e4, features = immune_markers, assay = "compexprs")
+```
+Save the object again!
+```{r}
+# Save the sce object
+saveRDS(sce, file = "/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/objects/sce_comp_clust_DR.rds")
+
+# Read the object back in allowing you to start your analysis from here and skip the compensation steps
+#sce<-readRDS(file = "/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/objects/sce_comp_clust_DR.rds")
+```
+
+
+## Visualization pre annotation
+
+Heatmap shown with all clustering markers (first) or with all "type" markers (second). Initial looks at the test dataset show very obvious eosinophil, macrophage, CD4/CD8/Treg, and B cell clusters which is promising. You don't want to see clusters expressing mixtures of markers that don't make sense biologically. This would mean you either underclustered your data or you have technical issues (staining problems, antibody aggregation issues, compensation issues).
+```{r}
+plotExprHeatmap(sce, features = immune_markers, by = "cluster_id", k = "meta20", bars = TRUE, perc = TRUE, row_clust=TRUE, assay = "compexprs")
+
+plotExprHeatmap(sce, features = "type", by = "cluster_id", k = "meta20", bars = TRUE, perc = TRUE, row_clust=TRUE, assay = "compexprs")
+```
+
+This visualizes the clusters in UMAP space. Good clustering will have little cluster mixing. Areas of cluster mixing should be flagged for potential cluster merging (see clusters 9 and 10 for example). Second line facets the UMAP by condition. This is really only useful if you've depleted entire cell types (CD8 depletion for example) dramatically or are looking at a more granular level than all immune cells.
+```{r}
+#plots the DR specificed colored by cluster ID and divides based on condition
+plotDR(sce, "UMAP", color_by = "meta20", assay = "compexprs")
+plotDR(sce, "UMAP", facet_by = "condition", assay = "compexprs")
+```
+
+Colors a UMAP by a specific marker. This can be further faceted by condition if you think marker expression may be chaning between condition. In the test data even by eye we can appreciate decreases in CD206 and iNOS expression in the myeloid compartment.
+```{r}
+plotDR(sce, "UMAP",color_by = c("CD206", "iNOS", "MHCII"), facet_by = "condition", assay = "compexprs")
+```
+
+Plot the abundance of each cluster by condition. This will be done again after cluster merging, but it'll give you an initial idea of differences between your conditions. In the test data, we can already appreciate some obvious differences (clusters 2, 3, 16, etc).
+```{r}
+plotAbundances(sce, k = "meta20", by = "cluster_id", shape_by = "condition")
+```
+
+## Cluster Annotation
+
+```{r}
+#merging on the sce
+merging_table <- read_excel("/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/cluster_merging_meta20_Leuk.xlsx")
+head(data.frame(merging_table))
+# convert to factor with merged clusters in desired order
+merging_table$new_cluster <- factor(merging_table$new_cluster, 
+    levels = c("CD4 T/Tregs","CD8 T","Ly6C T cells","pDCs","NK","Macrophage","Eosinophils","Neutrophils","B cells", "Monocytes","CD11b+ DCs","CD103+ DCs", "Mono/mac"))
+
+# apply manual merging
+sce <- mergeClusters(sce, k = "meta20", 
+    table = merging_table, id = "merging1", overwrite=TRUE)
+```
+
+Save your object! This should be your final one for high level immune data
+```{r}
+# Save the sce object
+saveRDS(sce, file = "/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/objects/sce_comp_clust_DR_anno.rds")
+
+# Read the object back in allowing you to start your analysis from here and skip the compensation steps
+#sce<-readRDS(file = "/Users/sguldberg/Box Sync/BMI270_CyTOF_full_analysis/analysis/objects/sce_comp_clust_DR_anno.rds")
+```
+
+
+## Visualization post annotation
+
+## UMAP and heatmaps
+```{r}
+# Visualize UMAP based on merged clusters
+plotDR(sce, "UMAP", color_by = "merging1", assay = "compexprs")+ theme_classic()
+
+# Visualize heatmap based on merged clusters
+plotExprHeatmap(sce, features = immune_markers,
+    by = "cluster_id", k = "merging1", assay = "compexprs")
+```
+
+## Cluster abundances
+```{r}
+# Plot cluster abundances based on condition
+plotAbundances(sce, k = "merging1", by = "cluster_id",shape_by="condition")
+```
+
+## Customizable cluster abundances
+```{r}
+# Customizable cluster abundances plot (easier to change order of groups, colors, etc)
+abun <- table(
+        cluster_id = cluster_ids(sce, "merging1"), 
+        sample_id = sample_ids(sce),
+        condition = colData(sce)$condition)
+abun <- prop.table(abun,2) * 100
+abun <- as.data.frame(abun)
+abun <- dplyr::filter(abun, Freq>0)
+abun <- dplyr::filter(abun, condition == "iso" | condition == "PD1")
+abun$condition <- factor(abun$condition, levels= c("iso","PD1"))
+p <- ggplot(abun, aes(y = Freq)) +
+  labs(x = NULL, y = "Proportion [%]") + 
+  theme_bw() + theme(panel.grid = element_blank(),
+                     strip.text = element_text(face = "bold"),
+                     strip.background = element_rect(fill = NA, color = NA), 
+                     axis.text = element_text(color = "black"),
+                     axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+                     legend.key.height  =  unit(0.8, "lines")) + 
+  guides(col = guide_legend(order = 1, override.aes = list(size = 3)),shape = guide_legend(override.aes = list(size = 3))) 
+
+p<-p+ facet_wrap(~cluster_id, scales = "free", ncol = 4) +
+  geom_boxplot(aes(x = condition, color = condition, fill=condition),
+               position = position_dodge(), alpha = 0.2, 
+               outlier.color = NA, show.legend = FALSE) + 
+  geom_point(aes(x = condition, col = condition, fill = condition),
+             position = position_jitter(width = 0.2))+
+  scale_color_manual(values=c('#1C75BC','#F76E5C'))+
+  scale_fill_manual(values=c('#1C75BC','#F76E5C'))
+p
+```
+
+## Density UMAPs by condition
+```{r}
+# Get metadata
+dat <- data.frame(colData(sce))
+# Get umap coordinates
+dat$UMAP1 <- sce@int_colData@listData$reducedDims@listData$UMAP[,1]
+dat$UMAP2 <- sce@int_colData@listData$reducedDims@listData$UMAP[,2]
+
+# plot above as density plot and faceted by Type
+plot <- ggplot(dat, aes(UMAP1, UMAP2)) +
+  geom_point(size = 1, color="#D3D3D3") +
+  theme(text = element_text(size = 16),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  theme(axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) +
+  labs(fill = "cell density") +
+  stat_density_2d(data=dat, 
+                  aes(fill = ..level..), 
+                  geom="polygon", 
+                  contour_var="ndensity")+
+                 # alpha=0.3) +
+  scale_fill_viridis(option="magma") +
+  scale_x_continuous(limits = c(-15,15)) +
+  scale_y_continuous(limits = c(-15,15))
+
+plot + facet_wrap(~ condition, ncol=2) +
+  theme(strip.text.x = element_text(size=16),
+        strip.background = element_blank(),
+        panel.border = element_blank())
+```
+
+## Cluster proportion by condition
+```{r}
+# Pull out # of cells in each cluster by sample ID
+pt <- data.frame(table(colData(sce)$condition,cluster_ids(sce, k = "merging1")))
+pt$Var1 <- factor(pt$Var1, levels= c("iso","PD1"))
+
+ggplot(pt, aes(x = Var1, y = Freq, fill = Var2)) +
+  theme_classic(base_size = 15) +
+  geom_col(position = "fill", width = 0.5) +
+  xlab("Condition") +
+  ylab("Proportion") +
+  theme(legend.title = element_blank())+
+  scale_fill_manual(values=CATALYST:::.cluster_cols)
+```
+
+
+## Differential abundance testing
+
+The package diffcyt is set up to do differential abundance testing with SCE objects. There are several statistical methods available (this chunk using generalized linear mixed models (GLMM)). diffcyt can also be used to test "differential states" which tests if any state markers are expressed significantly more in any clusters.  This is mostly useful if you have a significant number of state markers in your panel (such as a phospho signaling panel). For more info, check out the diffcyt workflow: https://www.bioconductor.org/packages/devel/bioc/vignettes/diffcyt/inst/doc/diffcyt_workflow.html 
+```{r}
+ei <- metadata(sce)$experiment_info 
+(da_formula1 <- createFormula(ei, 
+    cols_fixed = c("condition"), 
+    cols_random = "sample_id"))
+FDR_cutoff <- 0.1
+contrast <- createContrast(c(0, 1))
+da_res1 <- diffcyt(sce ,
+    formula = da_formula1, contrast = contrast,
+    analysis_type = "DA", method_DA = "diffcyt-DA-GLMM",
+    clustering_to_use = "merging1", verbose = FALSE)
+names(da_res1)
+rowData(da_res1$res) 
+table(rowData(da_res1$res)$p_adj < FDR_cutoff)
+da<-rowData(da_res1$res)
+plotDiffHeatmap(sce, da, all = TRUE, fdr = FDR_cutoff)
+diffcyt::topTable(da_res1, top_n=10)
+```
+The function below expands the functionality of diffcyt by testing whether specified marker(s) are differentially expressed within a cluster. diffcyt's differential state testing will only test markers classified as "state" in your SCE and will test across all clusters which may not be useful if marker expression is specific to certian clusters. The below function will test any marker in your panel for any cluster that you specify. This can be useful particularly in high level immune analysis to begin to understand how the states of immune cells may differ between conditions.
+```{r}
+# experiment = name of your single cell experiment (often sce)
+# cell_type = the cluster you are interested in testing differential expression (i.e. "Macrophage", "CD8 T")
+# clustering = the clustering in your single cell experiment that you are referencing (i.e. "merging1","meta20")
+# marker = the marker or markers you are interested in testing (i.e. "MHCII", c("F480","CD64"))
+# fdr_cutoff = adjusted p value cutoff point
+diff_expression<-function(experiment, cell_type, clustering, marker, fdr_cutoff){
+    if (cell_type!="all"){
+        sce_temp<-filterSCE(experiment, cluster_id %in% cell_type, k=clustering)
+    } else{
+        sce_temp<-experiment
+    }
+    new_df<-data.frame(matrix(ncol = 0, nrow = length(rowData(experiment)$marker_name)))
+    new_df$marker_name<-rowData(sce_temp)$marker_name
+    new_df$marker_num<-1:length(rowData(sce_temp)$marker_name)
+    marker_num<-new_df[match(marker,new_df$marker_name),]$marker_num
+    new_class<-rep("none",length(rowData(sce)$marker_name))
+    rowData(sce_temp)$marker_class<-new_class
+    rowData(sce_temp)$marker_class[marker_num]<-"state"
+    ei <- metadata(sce_temp)$experiment_info 
+    ds_formula1 <- createFormula(ei, cols_fixed = "condition")
+    contrast <- createContrast(c(0, 1))
+    ds_res2 <- diffcyt(sce_temp, formula = ds_formula1, contrast = contrast,
+                       analysis_type = "DS", method_DS = "diffcyt-DS-LMM",clustering_to_use = clustering, verbose =
+                           FALSE)
+    top<-diffcyt::topTable(ds_res2, top_n=10)
+    top<-na.omit(top)
+    diff_plot<-plotDiffHeatmap(sce_temp, rowData(ds_res2$res), all = TRUE, fdr = fdr_cutoff, top_n = 10)
+    return_list<-list(diff_plot, top)
+    return(return_list)
+}
+```
+
+Examples of the differential expression function.
+```{r}
+# Are macrophages more inflammatory (iNOS) and/or immunosuppressive (CD206) in one condition vs the other?
+diff_expression(sce, "Macrophage", "merging1", c("iNOS", "CD206"), 0.05) 
+```
+
+```{r}
+# Are macrophages more immature (CD64 high and F480 low) in one condition vs the other?
+diff_expression(sce, "Macrophage", "merging1", c("CD64", "F480"), 0.05) 
+```
+
+```{r}
+# Are any clusters more proliferative in one condition vs the other?
+diff_expression(sce, "all", "merging1", "Ki67", 0.05) 
+```
+
+
+## SCE filtering for further analysis
+Often we will want to filter a single cell experiment to a subset of conditions, organs, or cell type. Below is an example of filtering to CD8 T cells. At this point, we would want to re-run dimensionality reduction and clustering using a new set of markers specific to CD8 T cells. This type of analysis allows us to look at more granular subsets of CD8 T cells (or any other cell type).
+
+```{r}
+sce_CD8<-filterSCE(sce, cluster_id %in% c("CD8 T"), k="merging1")
+
+# plot UMAP to confirm filtering worked correctly
+plotDR(sce_CD8,"UMAP", color_by = "merging1", assay = "compexprs")+theme_classic()
+```
+
