@@ -1,6 +1,6 @@
 # pipelines
 
- The purpose of these pipelines is to allow for integrated CyTOF analysis from raw FCS files to an initial high-level analysis. Findings ideally should be assesed robustly via manual gating, iterative clustering with different random seeds, and different clustering algorithms.
+ The purpose of these pipelines is to allow for integrated CyTOF analysis from raw FCS files to an initial high-level analysis. Findings ideally should be assesed robustly via manual gating, iterative clustering with different random seeds, and different clustering algorithms. The templates folder contains example .csv and .xlsx files used throughout the analysis to increase ease of use. The templates folder also contains a spillover matrix that can be used to compensate CyTOF data.
 
  CyTOF_Pipeline.Rmd does not include batch correction and is appropriate for datasets that do not span multiple barcode plates or do not have appreciable batch effects.
 
