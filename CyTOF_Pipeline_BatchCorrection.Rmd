@@ -6,7 +6,7 @@ author: "Sophia Guldberg"
 ---
 ############################################## INSTALL PACKAGES ######################################################
 
-```{r}
+```{r, eval=FALSE}
 install.packages('devtools')
 install.packages('XML')
 install.packages('stringr')
@@ -37,6 +37,16 @@ install_github("nolanlab/cytofCore")
 # cyCombine is only necessary for batch effect correction
 install_github("biosurf/cyCombine")
 ```
+
+############################################# SET UP ###############################################################
+
+```{r, setup, include=FALSE}
+library(knitr)
+# Set your analysis directory
+wd = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis_retest/analysis"
+knitr::opts_knit$set(root.dir = wd)
+```
+
 
 ############################################## PRE- PROCESSING #######################################################
 ## Load Packages for pre-processing
@@ -72,7 +82,7 @@ Remove Beads
 6. Choose a cutoff for bead removal. This should be a number that corresponds to the colors on the rainbow.
 7. Remove beads either from current file or all files
 8. After bead removal, close the GUI and stop the code run
-```{r}
+```{r, eval=FALSE}
 normalizer_GUI()
 ```
 
@@ -86,16 +96,16 @@ Debarcode the files
 6. Save files
 7. If debarcoding a second plate, rename the debarcoded folder so it doesn't get overwritten in round 2
 8. After debarcoding all plates, combine all files into 1 folder for downstream analysis
-```{r}
+```{r, eval=FALSE}
 debarcoder_GUI()
 ```
 
 Rename channels in the files
 This step is only necessary if you dont have the correct antigen names loaded on the physical CyTOF machine while you run. I find it tedious to manually change all of the antigen names on the CyTOF machine so I always use this step.
 ```{r}
-# Set the working directory to your folder containing files
-wd = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/pre_processing/raw/normed/beads_removed/debarcoded_all"
-setwd(wd)
+# Set the wd to your debarcoded files
+temp_wd = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis_retest/pre_processing/raw/normed/beads_removed/debarcoded_all"
+setwd(temp_wd)
 
 # Write out the current channel names into your working directory as Panel.csv
 currentFile = as.matrix(list.files(pattern = ".fcs"))[1] 
@@ -112,18 +122,26 @@ Rename channels
 3. Save as Panel_correct.csv
 ```{r}
 # Set to your corrected panel
-setwd(wd)
+setwd(temp_wd)
 panel = "Panel_correct.csv"
 
 # Rename channels
-cytofCore.updatePanel(templateFile = panel,fcsFolder = wd)
+cytofCore.updatePanel(templateFile = panel,fcsFolder = temp_wd)
 ```
 Rename file names. This step is not necessary but I like to remove most of the long file name to include just the sample information required for downstream analysis.
 ```{r}
-wd = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/pre_processing/raw/normed/beads_removed/debarcoded_all/relabeled"
-setwd(wd)
+# Copy all files into a new folder to avoid overwriting incorrectly
+setwd(paste(temp_wd, "/relabeled", sep = ""))
 # get all fcs files from wd
 files <- list.files(pattern = ".fcs")
+dir.create("renamed")
+file.copy(from=files, to="./renamed", 
+          overwrite = TRUE, recursive = FALSE, 
+          copy.mode = TRUE)
+```
+
+```{r}
+setwd(paste(temp_wd, "/relabeled/renamed", sep = ""))
 # remove the norm control files
 files <- Filter(function(x) !any(grepl("norm_cntrl", x)), files)
 # extract sample info from the file names
@@ -132,7 +150,14 @@ new_files<-paste(new_files, ".fcs", sep="")
 #rename current file names to new file names
 file.rename(files, new_files)
 ```
-At this point, FCS file are ready to go back into Cell Engine for initial gating. We want to gate out any beads (often some are left behind after the computational removal), dead cells, doublets, and erythrocytes. It's at this point that you want to check for any batch effects between plates using your normalization control. If there are batch effects, you will want to proceed with batch correction. If not, feel free to skip that step and move straight into analysis.
+At this point, FCS file are ready to go back into Cell Engine for initial gating. We want to gate out any beads (often some are left behind after the computational removal), dead cells, doublets, and erythrocytes. It's at this point that you want to check for any batch effects between plates using your normalization control. If there are batch effects, you will want to proceed with batch correction. If not, feel free to skip that step and move straight into analysis. 
+
+```{r}
+# Create new folder for gated leukocytes downloaded from Cell Engine
+# Move your gated leukocytes into this folder
+dir.create(file.path("fcs_leukocytes_gated"))
+```
+
 
 ################################################# BATCH CORRECTION ##########################################################
 
@@ -150,13 +175,21 @@ library("readxl")
 
 ## Set up data
 Below we load the path to a folder of fcs files gated to Leukocytes (from the test dataset we are using just a subset of data), an excel sheet with panel information, and an excel sheet with sample metadata. We extract markers for batch correction from our panel which should have the column names fcs_colname, antigen, and marker_class. marker_class can be "type", "state", or "none". Any markers marked "none" will not be batch corrected and will be removed from downstream fcs files (barcode channels for example).
+
+```{r}
+# Create new folder for batch correction
+# Add panel information and metadata to this folder
+dir.create(file.path("batch_correction"))
+```
+
+
 ```{r}
 # Directory containing .fcs files
-data_dir <- "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/batch_correction/fcs_leukocytes"
-path_panel <- "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/batch_correction/E035_panel_Leuk.xlsx"
-path_metdata<-"/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/batch_correction/E035_sample_metadata.xlsx"
+data_dir <- "./fcs_leukocytes_gated"
+path_panel <- "./batch_correction/E035_panel_Leuk.xlsx"
+path_md<-"./batch_correction/E035_sample_metadata.xlsx"
 panel <- read_excel(path_panel)
-metadata<- read_excel(path_metdata)
+md<- read_excel(path_md)
 
 # Markers of interest (to batch correct on)
 markers <- panel %>%
@@ -179,7 +212,7 @@ cyCombine publication: https://www.nature.com/articles/s41467-022-29383-5
 # Compile fcs files and preprocess
 uncorrected <- prepare_data(data_dir = data_dir,
                              markers = markers,
-                             metadata = metadata, 
+                             metadata = md, 
                              sample_ids = "sample_id", # column in metadata
                              batch_ids = "run", # column in metadata
                              filename_col = "file_name", # column in metadata
@@ -189,7 +222,8 @@ uncorrected <- prepare_data(data_dir = data_dir,
                             # sample_size = 500000,
                              seed = 1234,
                              cofactor = 5) 
-saveRDS(uncorrected, file = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/batch_correction/cycombine_raw_uncorrected.RDS")
+file_name = "./batch_correction/cycombine_raw_uncorrected.RDS"
+saveRDS(uncorrected, file = file_name)
 ```
 
 ## Do we need to perform batch correction?
@@ -197,7 +231,7 @@ Ideally, you already have a sense for this, but if not you can run the below fun
 
 Note: The test dataset has very low batch effects and probably does not need batch correction at all. For testing purposes, batch correction is performed.
 ```{r}
-detect_batch_effect_express(uncorrected, downsample = 10000, out_dir = '/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/batch_correction/batch_effect_check')
+detect_batch_effect_express(uncorrected, downsample = 10000, out_dir = './batch_correction/batch_effect_check')
 ```
 
 ## Run batch correction
@@ -210,7 +244,8 @@ corrected <- uncorrected %>%
                 rlen = 10, # Consider a larger value, if results are not convincing (e.g. 100)
                # covar = "condition",
                 anchor = "anchor")
-saveRDS(corrected, file = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/batch_correction/cycombine_raw_corrected.RDS")
+file_name = "./batch_correction/cycombine_raw_corrected.RDS"
+saveRDS(corrected, file = file_name)
 ```
 
 ## Evaluate correction
@@ -218,7 +253,7 @@ Here data_dir should be set to the folder containing your _raw_uncorrected.rds a
 
 Note: In the test dataset, there are very few batch effects so the corrections are quite minor.
 ```{r}
-run_analysis(tool = "cycombine", data = "raw", data_dir = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/batch_correction", markers = markers)
+run_analysis(tool = "cycombine", data = "raw", data_dir = "./batch_correction", markers = markers)
 ```
 
 ## Write corrected data back to FCS files
@@ -229,8 +264,9 @@ sce<-df2SCE(corrected, markers = markers, sample_col = "sample", panel = panel, 
 
 ```{r}
 # write flowframe from single cell experiment using sample ID
-sce2FCS(sce, split_by = "sample_id", assay = "counts", randomize = TRUE, outdir = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/batch_correction/batch_corrected_fcs")
+sce2FCS(sce, split_by = "sample_id", assay = "counts", randomize = TRUE, outdir = "./batch_corrected_fcs_leukocytes")
 ```
+
 
 At this point, you can move your FCS files into Cell Engine, but they still require compensation so I recommend proceeding to compensation before moving back to Cell Engine. The only reason to import to Cell Engine would be to check the similarity of norm control samples (if you have them). This functionality is not built into cyCombine since all plots are shown averaged by batch.
 
@@ -260,17 +296,24 @@ You will need pre-processed FCS files gated to Leukocytes only (or your populati
 
 Your metadata file must have (at minimum) columns called file_name, sample_id, and condition.
 
+```{r}
+# Create new folder for CATATLYST analysis
+# Add metadata to this folder. FCS file names will be different than initially so a new metadata file is necessary
+# Add panel information to this folder IF YOU HAVEN'T RUN CYCOMBINE
+dir.create(file.path("CATALYST"))
+```
+
 Load metadata file
 ```{r}
-path_md <- "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/CATALYST/E035_metadata_Leuk.xlsx"
+path_md <- "./CATALYST/E035_metadata_Leuk.xlsx"
 md <- read_excel(path_md)
 head(data.frame(md))
 ```
 
-Load pre-processed FCS files. Move any norm control samples into a different folder to prevent them being added to your SCE
+Load pre-processed FCS files.
 ```{r}
 #read in FCS files as flowSet
-path_fcs<- "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/batch_correction/batch_corrected_fcs"
+path_fcs<- "./batch_corrected_fcs_leukocytes"
 data<-read.flowSet(path=path_fcs, pattern="fcs$")
 ```
 
@@ -279,11 +322,17 @@ Load panel info. If below chunk reads "FALSE" then your panel channels do not ma
 Your panel file must have the column names fcs_colname, antigen, and marker_class EXACTLY to create the sce.
 ```{r}
 #read in panel information
-path_panel <- "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/CATALYST/E035_panel_Leuk_Catalyst.xlsx"
-panel <- read_excel(path_panel)
+if(exists("panel")==TRUE){
+  panel <- panel %>%
+  dplyr::filter(marker_class != "none")
+} else {
+  path_panel <- "./CATALYST/E035_panel_Leuk_Catalyst.xlsx"
+  panel <- read_excel(path_panel)
+}
 head(data.frame(panel))
 #spot check that panel matches flowset
 all(panel$fcs_colname %in% colnames(data))
+
 ```
 
 Create your sce object. Make sure to change the condition levels to reflect your experiment and to add any extra columns present in your metadata file as factors (i.e. experiment, organ, genotype, treatment, etc).
@@ -292,11 +341,12 @@ Create your sce object. Make sure to change the condition levels to reflect your
 md$condition<-factor(md$condition, levels=c("iso","PD1"))
 md$sample_id <- factor(md$sample_id, levels = md$sample_id[order(md$condition)])
 #specify columns in metadata (file_name and sample_id are the necessary ones)
-md_cols = list(file = "file_name", id = "sample_id", factors = c("condition"))
+md_cols = list(file = "file_name", id = "sample_id", factors = c("condition", "analysis"))
 
 # construct SingleCellExperiment
 sce <- prepData(data, panel, md, features = panel$fcs_colname, md_cols = md_cols)
 ```
+
 
 ## Compensate 
 Compensation is not strictly necessary for CyTOF data. However, sometimes channels will have noticeable spillover issues and compensating cleans up all of the data really nicely.
@@ -304,7 +354,7 @@ Compensation is not strictly necessary for CyTOF data. However, sometimes channe
 Read in spillover matrix and format properly for CATALYST. CATALYST workflow would like you to run compensation with each CyTOF run. However, since spillover values are relatively constant and low from run to run, we have generated a spillover matrix that can be used across runs.
 ```{r}
 #read in spillover matrix
-spillover<-data.frame(read_excel("/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/CATALYST/cytof_spillover_matrix_wDi.xlsx"))
+spillover<-data.frame(read_excel("./CATALYST/cytof_spillover_matrix_wDi.xlsx"))
 #set rownames to metal channels
 rownames(spillover)<-spillover$...1
 #remove extra column
@@ -320,7 +370,7 @@ Run the compensation on your sce using the spillover matrix provided. This will 
 sce<-compCytof(sce, spillover, method = "nnls", overwrite = FALSE)
 ```
 
-Spot check channels that tend to have a lot of spillover.
+Spot check channels that tend to have a lot of spillover. Note that if you set overwrite = TRUE you won't be able to view these.
 ```{r}
 chs <- c("Yb171Di", "Yb172Di")
 as <- c("exprs", "compexprs")
@@ -346,23 +396,29 @@ fs <- sce2fcs(sce, split_by = "sample_id", assay = "compcounts")
 all(c(fsApply(fs, nrow)) == table(sce$sample_id))
 ids <- fsApply(fs, identifier)
 # write out each FCS file to the path specified
+dir.create(file.path("./CATALYST/comp_fcs"))
 for (id in ids) {
     ff <- fs[[id]]                     # subset 'flowFrame'
     fn <- sprintf("comp_%s.fcs", id) # specify output name that includes ID
-    fn <- file.path("/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/CATALYST/comp_fcs", fn)         # construct output path
+    fn <- file.path("./CATALYST/comp_fcs", fn)         # construct output path
     write.FCS(ff, fn)                  # write frame to FCS
 }
 ```
 
 Periodically, you will want to save your sce object to your computer allowing you to start your analysis from where you left off. This is particularly useful when using cloud computing. In initial analysis steps, I would save an RDS after every computationally intensive step.
 ```{r}
+dir.create(file.path("./CATALYST/objects"))
 # Save the sce object
-saveRDS(sce, file = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/CATALYST/objects/sce_comp.rds")
+saveRDS(sce, file = "./CATALYST/objects/sce_comp.rds")
 
 # Read the object back in allowing you to start your analysis from here and skip the compensation steps
-#sce<-readRDS(file = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/CATALYST/objects/sce_comp.rds")
+#sce<-readRDS(file = "./CATALYST/objects/sce_comp.rds")
 ```
 
+Filter out your normalization controls. I like to use a binary operator in the metadata for whether or not the sample should be included in analysis
+```{r}
+sce<-filterSCE(sce, analysis == "1")
+```
 
 ## Intial Plotting
 
@@ -398,10 +454,10 @@ sce <- runDR(sce, "UMAP", cells = 1e4, features = immune_markers, assay = "compe
 Save the object again!
 ```{r}
 # Save the sce object
-saveRDS(sce, file = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/CATALYST/objects/sce_comp_clust_DR.rds")
+saveRDS(sce, file = "./CATALYST/objects/sce_comp_clust_DR.rds")
 
 # Read the object back in allowing you to start your analysis from here and skip the compensation steps
-#sce<-readRDS(file = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/CATALYST/objects/sce_comp_clust_DR.rds")
+#sce<-readRDS(file = "./CATALYST/objects/sce_comp_clust_DR.rds")
 ```
 
 
@@ -435,7 +491,7 @@ plotAbundances(sce, k = "meta20", by = "cluster_id", shape_by = "condition")
 
 ```{r}
 #merging on the sce
-merging_table <- read_excel("/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/CATALYST/cluster_merging_meta20_Leuk.xlsx")
+merging_table <- read_excel("./CATALYST/cluster_merging_meta20_Leuk.xlsx")
 head(data.frame(merging_table))
 # convert to factor with merged clusters in desired order
 merging_table$new_cluster <- factor(merging_table$new_cluster, 
@@ -449,10 +505,10 @@ sce <- mergeClusters(sce, k = "meta20",
 Save your object! This should be your final one for high level immune data
 ```{r}
 # Save the sce object
-saveRDS(sce, file = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/CATALYST/objects/sce_comp_clust_DR_anno.rds")
+saveRDS(sce, file = "./CATALYST/objects/sce_comp_clust_DR_anno.rds")
 
 # Read the object back in allowing you to start your analysis from here and skip the compensation steps
-#sce<-readRDS(file = "/Users/sguldberg/Box Sync/CyTOF_pipeline_test_data_full_analysis/analysis/CATALYST/objects/sce_comp_clust_DR_anno.rds")
+#sce<-readRDS(file = "./CATALYST/objects/sce_comp_clust_DR_anno.rds")
 ```
 
 
@@ -477,15 +533,28 @@ plotAbundances(sce, k = "merging1", by = "cluster_id",shape_by="condition")
 ## Customizable cluster abundances
 ```{r}
 # Customizable cluster abundances plot (easier to change order of groups, colors, etc)
-abun <- table(
-        cluster_id = cluster_ids(sce, "merging1"), 
-        sample_id = sample_ids(sce),
-        condition = colData(sce)$condition)
-abun <- prop.table(abun,2) * 100
-abun <- as.data.frame(abun)
-abun <- dplyr::filter(abun, Freq>0)
-abun <- dplyr::filter(abun, condition == "iso" | condition == "PD1")
+# Name of your single cell experiment object
+x<-sce
+# Name of your clustering
+k<-"merging1"
+# Get a table of your samples and clusters
+ns <- table(
+  cluster_id = cluster_ids(x, k), 
+  sample_id = sample_ids(x))
+# Convert to frequency from number of cells
+fq <- prop.table(ns, 2) * 100
+# Convert to dataframe
+abun <- as.data.frame(fq)
+# Add relevant cell metadata
+m <- match(abun$sample_id, x$sample_id)
+metadata<-c("condition")
+for (i in metadata)
+  abun[[i]] <- x[[i]][m]
+
+# Change/update the ordering of your metadata
 abun$condition <- factor(abun$condition, levels= c("iso","PD1"))
+
+# Plot
 p <- ggplot(abun, aes(y = Freq)) +
   labs(x = NULL, y = "Proportion [%]") + 
   theme_bw() + theme(panel.grid = element_blank(),
@@ -562,23 +631,24 @@ ggplot(pt, aes(x = Var1, y = Freq, fill = Var2)) +
 ## Differential abundance testing
 
 The package diffcyt is set up to do differential abundance testing with SCE objects. There are several statistical methods available (this chunk using generalized linear mixed models (GLMM)). diffcyt can also be used to test "differential states" which tests if any state markers are expressed significantly more in any clusters.  This is mostly useful if you have a significant number of state markers in your panel (such as a phospho signaling panel). For more info, check out the diffcyt workflow: https://www.bioconductor.org/packages/devel/bioc/vignettes/diffcyt/inst/doc/diffcyt_workflow.html 
+
 ```{r}
 ei <- metadata(sce)$experiment_info 
-(da_formula1 <- createFormula(ei, 
+da_formula1 <- createFormula(ei, 
     cols_fixed = c("condition"), 
-    cols_random = "sample_id"))
+    cols_random = "sample_id")
 FDR_cutoff <- 0.1
 contrast <- createContrast(c(0, 1))
-da_res1 <- diffcyt(sce ,
+da_res1 <- diffcyt(sce,
     formula = da_formula1, contrast = contrast,
     analysis_type = "DA", method_DA = "diffcyt-DA-GLMM",
-    clustering_to_use = "merging1", verbose = FALSE)
+    clustering_to_use = "merging2", verbose = FALSE)
 names(da_res1)
 rowData(da_res1$res) 
 table(rowData(da_res1$res)$p_adj < FDR_cutoff)
 da<-rowData(da_res1$res)
-plotDiffHeatmap(sce, da, all = TRUE, fdr = FDR_cutoff)
-diffcyt::topTable(da_res1, top_n=10)
+CATALYST::plotDiffHeatmap(sce, da, all = TRUE, fdr = FDR_cutoff)
+diffcyt::topTable(da_res1, top_n=10, show_props = TRUE)
 ```
 The function below expands the functionality of diffcyt by testing whether specified marker(s) are differentially expressed within a cluster. diffcyt's differential state testing will only test markers classified as "state" in your SCE and will test across all clusters which may not be useful if marker expression is specific to certian clusters. The below function will test any marker in your panel for any cluster that you specify. This can be useful particularly in high level immune analysis to begin to understand how the states of immune cells may differ between conditions.
 ```{r}
