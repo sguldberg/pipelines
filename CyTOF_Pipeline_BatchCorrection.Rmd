@@ -347,6 +347,52 @@ md_cols = list(file = "file_name", id = "sample_id", factors = c("condition", "a
 sce <- prepData(data, panel, md, features = panel$fcs_colname, md_cols = md_cols)
 ```
 
+## Add metadata after SCE creation (optional)
+This function can be used to add metadata to your SCE after creation without having to re-run all of the code from the beginning. This function can be used at any point in the pipeline.
+Ex. sce_test<-AddMetadataSCE(sce_test, new_md_test)
+Test that the function worked properly afterwards by plotting your data grouped by or colored by the new metadata.
+```{r}
+# sce = a single cell experiment object that you wish to add metadata to
+# new_md = a dataframe with at minimum a sample_id column that matches your SCE and a column of new metadata. This dataframe can have as many new metadata columns as you wish. 
+# The dataframe can also be the old metadata file used in PrepData with new columns added. 
+AddMetadataSCE<-function(sce, new_md){
+  # Pull out the current metadata you've put in
+  df<-sce@metadata$experiment_info
+  # putting this in order by sample_id is important for later adding to colData
+  df <- df[order(df$sample_id),]
+  # Convert new metadata columns to factors
+  new_md[,1:ncol(new_md)] <- lapply(new_md[,1:ncol(new_md)] , as.factor)
+  # Add the new metadata to the old by matching by sample_id (change to patient_id if thats what you're using)
+  df<-cbind(df, new_md[match(df$sample_id, new_md$sample_id),])
+  
+  # specify which columns to add to the colData and experiment info
+  # first j removes the n_cells column which isn't in the colData, but we don't want to add
+  # second j is to narrow further to exclude any columns already in the colData like the sample_id
+  j<-setdiff(names(df), c("n_cells", "file_name"))
+  j<-setdiff(j, "file_name")
+  j <- setdiff(j, names(colData(sce)))
+  
+  # filter the metadata df to only the columns you want to add to experiment info
+  df_new<-df[,colnames(df) %in% j]
+  # ensure that order of samples is correct in experiment info 
+  sce@metadata$experiment_info<-sce@metadata$experiment_info[order(sce@metadata$experiment_info$sample_id),]
+  # Add the new metadata by sample into experiment info
+  sce@metadata$experiment_info<-cbind(sce@metadata$experiment_info, df_new)
+  
+  # generate a dataframe which has your metadata info for every single cell instead of every sample
+  # each new piece of metadata will be 1 column
+  cd<-data.frame((lapply(df[j], function(u) {
+    v <- as.character(rep(u, df$n_cells))
+    factor(v, levels = levels(u))
+  })))
+  # Match the order of your colData to your cd dataframe which is based on the original order of df
+  # IMPORTANT: the ordering is really important or you may assign the wrong metadata to the wrong cell
+  colData(sce)<-colData(sce)[order(colData(sce)$sample_id),]
+  # Add the new metadata
+  colData(sce) <- cbind(colData(sce), cd)
+  return(sce)
+}
+```
 
 ## Compensate 
 Compensation is not strictly necessary for CyTOF data. However, sometimes channels will have noticeable spillover issues and compensating cleans up all of the data really nicely.
